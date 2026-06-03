@@ -219,6 +219,7 @@ namespace WordCards
 
         private void btnShuffle_Click(object sender, EventArgs e)
         {
+            lstWordList.Focus();
             _isShuffled = !_isShuffled;
 
             if (_isShuffled)
