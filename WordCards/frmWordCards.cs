@@ -1,12 +1,10 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 using WMPLib;
 
@@ -14,29 +12,33 @@ namespace WordCards
 {
     public partial class frmWordCards : Form
     {
-        /// <summary>
-        /// 單字清單
-        /// </summary>
+        // ─── 資料 ───
         WordCollection _WordList = new WordCollection();
-        /// <summary>
-        /// Windows Media Player 播放器
-        /// </summary>
+        List<WordItem> _DisplayList = new List<WordItem>();
+
+        // ─── 播放 ───
         WindowsMediaPlayer wmp = new WindowsMediaPlayer();
-        string strWordFile = "WordCards.txt"; // 單字檔名
-        /// <summary>
-        /// 是否自動播放
-        /// </summary>
+        string strWordFile = "WordCards.txt";
         bool isPlay = false;
+
+        // ─── 亂序 ───
+        bool _isShuffled = false;
+        Random _rnd = new Random();
+
+        // ─── Win32：TextBox 提示文字 ───
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam);
+        private const uint EM_SETCUEBANNER = 0x1501;
 
         public frmWordCards()
         {
             InitializeComponent();
         }
 
-        /// <summary>
-        /// 顯示單字
-        /// </summary>
-        /// <param name="word">單字物件</param>
+        // ════════════════════════════════════════
+        //  顯示 / 播放
+        // ════════════════════════════════════════
+
         private void ShowWord(WordItem word)
         {
             txtWord.Text = word.Word;
@@ -44,193 +46,268 @@ namespace WordCards
             txtExplain.Text = word.Explain;
         }
 
-        /// <summary>
-        /// 將單字加入到播放清單
-        /// </summary>
-        private void UpdateWordList()
-        {
-            lstWordList.BeginUpdate(); // 開始更新
-            lstWordList.Items.Clear();
-            foreach (WordItem item in this._WordList)
-            {
-                lstWordList.Items.Add(item);
-            }
-            lstWordList.EndUpdate(); // 結束更新
-        }
-
-
-
-        /// <summary>
-        /// 播放單字音檔
-        /// </summary>
-        /// <param name="word">單字物件</param>
         private void PlayWord(WordItem word)
         {
-            // 判斷音效檔是否存在
             if (File.Exists(word.SoundPath))
             {
-                // 播放單字音檔
                 wmp.URL = word.SoundPath;
                 wmp.settings.autoStart = false;
                 wmp.settings.mute = false;
                 wmp.controls.play();
             }
             else
-                tsslMessage.Text = $"找無 {word.SoundPath} 音效檔";
+            {
+                tsslMessage.Text = $"⚠  找不到音檔：{word.SoundPath}";
+            }
         }
+
+        private void PlaySelectedWord()
+        {
+            if (lstWordList.SelectedItem == null || _DisplayList.Count == 0) return;
+            int idx = lstWordList.SelectedIndex;
+            if (idx < 0 || idx >= _DisplayList.Count) return;
+
+            ShowWord(_DisplayList[idx]);
+            PlayWord(_DisplayList[idx]);
+            UpdateProgress(idx);
+        }
+
+        // ════════════════════════════════════════
+        //  清單管理
+        // ════════════════════════════════════════
+
+        /// <summary>根據搜尋文字 + 亂序設定更新顯示清單</summary>
+        private void UpdateWordList()
+        {
+            string search = txtSearch.Text.Trim().ToLower();
+
+            IEnumerable<WordItem> filtered = _WordList;
+            if (!string.IsNullOrEmpty(search))
+            {
+                filtered = _WordList.Where(w =>
+                    w.Word.ToLower().Contains(search) ||
+                    w.Explain.ToLower().Contains(search));
+            }
+
+            _DisplayList = filtered.ToList();
+
+            if (_isShuffled)
+            {
+                // Fisher-Yates shuffle
+                for (int i = _DisplayList.Count - 1; i > 0; i--)
+                {
+                    int j = _rnd.Next(i + 1);
+                    var tmp = _DisplayList[i];
+                    _DisplayList[i] = _DisplayList[j];
+                    _DisplayList[j] = tmp;
+                }
+            }
+
+            lstWordList.BeginUpdate();
+            lstWordList.Items.Clear();
+            foreach (WordItem item in _DisplayList)
+                lstWordList.Items.Add(item);
+            lstWordList.EndUpdate();
+
+            // 更新狀態列
+            if (_DisplayList.Count != _WordList.Count && _WordList.Count > 0)
+                tsslMessage.Text = $"篩選顯示 {_DisplayList.Count} / {_WordList.Count} 個單字";
+            else
+                tsslMessage.Text = $"共 {_WordList.Count} 個單字";
+        }
+
+        /// <summary>更新進度標籤</summary>
+        private void UpdateProgress(int idx)
+        {
+            int total = _DisplayList.Count;
+            lblProgress.Text = total > 0
+                ? $"{(idx >= 0 ? idx + 1 : 1):N0} / {total:N0}"
+                : "0 / 0";
+        }
+
+        private void NextWordList()
+        {
+            lstWordList.Focus();
+            if (_DisplayList.Count == 0) return;
+
+            if (lstWordList.SelectedIndex + 1 >= lstWordList.Items.Count)
+                lstWordList.SelectedIndex = 0;
+            else
+                lstWordList.SelectedIndex++;
+
+            // 保持選取項在畫面中間
+            int rows = lstWordList.Height / lstWordList.GetItemHeight(0);
+            if (lstWordList.SelectedIndex >= rows / 2)
+                lstWordList.TopIndex = lstWordList.SelectedIndex - rows / 2;
+        }
+
+        // ════════════════════════════════════════
+        //  載入
+        // ════════════════════════════════════════
 
         private void frmWordCards_Load(object sender, EventArgs e)
         {
-            string[] lines;
-            // 若單字檔存在
-            if (File.Exists(strWordFile))
+            // 設定搜尋框提示文字（Win32 cue banner）
+            SendMessage(txtSearch.Handle, EM_SETCUEBANNER, (IntPtr)1, "🔍  搜尋單字 / 解釋...");
+
+            if (!File.Exists(strWordFile))
             {
-                lines = File.ReadAllLines(strWordFile, Encoding.UTF8);
-            }
-            else
-            {
-                MessageBox.Show($"找不到單字檔\n{strWordFile}", "錯誤", MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
+                MessageBox.Show($"找不到單字檔\n{strWordFile}", "錯誤",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
                 Application.Exit();
                 return;
             }
-            // 載入單字檔
-            this._WordList.LoadFromStringArray(lines);
-            if (this._WordList.Count > 0)
+
+            string[] lines = File.ReadAllLines(strWordFile, Encoding.UTF8);
+            _WordList.LoadFromStringArray(lines);
+
+            if (_WordList.Count > 0)
             {
-                // 更新單字清單
                 UpdateWordList();
-                // 顯示第一個單字
-                this.ShowWord(_WordList[0]);
-                tsslMessage.Text = $"單字數量：{_WordList.Count}";
-            }
-
-        }
-
-        /// <summary>
-        /// 播放目前選取的單字
-        /// </summary>
-        private void PlaySelectedWord()
-        {
-            // 判斷目前選的項目是否為空
-            if (lstWordList.SelectedItem != null)
-            {
-                // 取得目前選取的單字索引
-                int idx = lstWordList.SelectedIndex;
-                // 顯示單字
-                ShowWord(_WordList[idx]);
-                // 播放單字的發音
-                PlayWord(_WordList[idx]);
+                lstWordList.SelectedIndex = 0;
+                ShowWord(_DisplayList[0]);
+                UpdateProgress(0);
             }
         }
+
+        // ════════════════════════════════════════
+        //  事件：清單
+        // ════════════════════════════════════════
 
         private void lstWordList_Click(object sender, EventArgs e)
         {
-            // 判斷是否自動播放
-            if (isPlay == true)
-                btnAutoPlay.PerformClick(); // 點擊自動播放按鈕
-                                            // 判斷是否有選取項目
-            if (lstWordList.SelectedItem != null)
-                // 判斷是否有選取項目
-                if (lstWordList.SelectedItem.ToString().Length != 0)
-                {
-                    // 顯示並播放目前選取的單字
-                    PlaySelectedWord();
-                }
-
-        }
-
-        /// <summary>
-        /// 將單字清單的選項移到下一個
-        /// </summary>
-        private void NextWordList()
-        {
-            // 將焦點移到單字清單
-            lstWordList.Focus();
-            // 判斷目前選的下一項是否超過清單的項目數
-            if (lstWordList.SelectedIndex + 1 >= lstWordList.Items.Count)
-                lstWordList.SelectedIndex = 0; // 如果超過就回到第一項
-            else
-                lstWordList.SelectedIndex++; // 如果沒有就選擇下一項
-                                             // 計算目前 lstWordList 顯示的行數
-            int lstRows = lstWordList.Height / lstWordList.GetItemHeight(0);
-            // 如果目前選的項目大於 lstRows / 2
-            if (lstWordList.SelectedIndex >= lstRows / 2)
-                // 將 lstWordList 的 選項保持在中間
-                lstWordList.TopIndex = lstWordList.SelectedIndex - lstRows / 2;
-        }
-
-        private void timePlayer_Tick(object sender, EventArgs e)
-        {
-            // 移到下一個單字
-            NextWordList();
-            // 顯示並播放目前選取的單字
-            PlaySelectedWord();
-
-        }
-
-        private void btnAutoPlay_Click(object sender, EventArgs e)
-        {
-            // 將焦點移到單字清單
-            lstWordList.Focus();
-            // 若目前不是自動播放
-            if (isPlay == false)
-            {
-                btnAutoPlay.Text = "Stop";
-                isPlay = true;
-                // 顯示並播放目前選取的單字
+            if (isPlay) btnAutoPlay.PerformClick(); // 停止自動播放
+            if (lstWordList.SelectedItem != null && lstWordList.SelectedItem.ToString().Length != 0)
                 PlaySelectedWord();
-                timePlayer.Start();
-            }
-            else
-            {
-                btnAutoPlay.Text = "Play";
-                isPlay = false;
-                timePlayer.Stop();
-            }
-        }
-
-        private void frmWordCards_KeyPress(object sender, KeyPressEventArgs e)
-        {
-            if (isPlay == true)
-                return;
-            switch (e.KeyChar)
-            {
-                case (char)Keys.Return:
-                    // 當按下 Enter 時，播放下一個單字
-                    NextWordList();
-                    // 顯示並播放目前選取的單字
-                    PlaySelectedWord();
-                    e.Handled = true;
-                    break;
-                case (char)Keys.Space:
-                    // 當按下 Space 時，重複播放目前單字
-                    if (lstWordList.SelectedIndex >= 0)
-                    {
-                        // 顯示並播放目前選取的單字
-                        PlaySelectedWord();
-                    }
-                    e.Handled = true;
-                    break;
-            }
         }
 
         private void lstWordList_MouseDoubleClick(object sender, MouseEventArgs e)
         {
             lstWordList.Focus();
-            // 目前選取的索引
             int idx = lstWordList.SelectedIndex;
-            frmEditWord edit = new frmEditWord(_WordList[idx]);
-            DialogResult result = edit.ShowDialog(this);
-            // 如果使用者按下 儲存 按鈕
-            if (result == DialogResult.Yes)
+            if (idx < 0 || idx >= _DisplayList.Count) return;
+
+            frmEditWord edit = new frmEditWord(_DisplayList[idx]);
+            if (edit.ShowDialog(this) == DialogResult.Yes)
             {
-                // 顯示並播放目前選取的單字
                 PlaySelectedWord();
-
-                // 儲存單字
                 _WordList.SaveToFile(strWordFile);
+            }
+        }
 
+        // ════════════════════════════════════════
+        //  事件：按鈕
+        // ════════════════════════════════════════
+
+        private void btnAutoPlay_Click(object sender, EventArgs e)
+        {
+            lstWordList.Focus();
+            if (!isPlay)
+            {
+                btnAutoPlay.Text = "⏹  停止";
+                isPlay = true;
+                PlaySelectedWord();
+                timePlayer.Start();
+            }
+            else
+            {
+                btnAutoPlay.Text = "▶  播放";
+                isPlay = false;
+                timePlayer.Stop();
+            }
+        }
+
+        private void btnShuffle_Click(object sender, EventArgs e)
+        {
+            _isShuffled = !_isShuffled;
+
+            if (_isShuffled)
+            {
+                btnShuffle.Text = "🔀  亂序：開";
+                btnShuffle.BackColor = Color.FromArgb(46, 125, 50);   // 深綠
+            }
+            else
+            {
+                btnShuffle.Text = "🔀  亂序：關";
+                btnShuffle.BackColor = Color.FromArgb(96, 125, 139);  // 藍灰
+            }
+
+            UpdateWordList();
+            if (lstWordList.Items.Count > 0)
+            {
+                lstWordList.SelectedIndex = 0;
+                ShowWord(_DisplayList[0]);
+                UpdateProgress(0);
+            }
+            else
+            {
+                txtWord.Text = txtPhonogram.Text = txtExplain.Text = "";
+                UpdateProgress(-1);
+            }
+        }
+
+        // ════════════════════════════════════════
+        //  事件：搜尋
+        // ════════════════════════════════════════
+
+        private void txtSearch_TextChanged(object sender, EventArgs e)
+        {
+            if (_WordList.Count == 0) return;
+            if (isPlay) btnAutoPlay.PerformClick(); // 搜尋時停止自動播放
+
+            UpdateWordList();
+            if (lstWordList.Items.Count > 0)
+            {
+                lstWordList.SelectedIndex = 0;
+                ShowWord(_DisplayList[0]);
+                UpdateProgress(0);
+            }
+            else
+            {
+                txtWord.Text = "";
+                txtPhonogram.Text = "";
+                txtExplain.Text = "沒有符合的單字";
+                UpdateProgress(-1);
+            }
+        }
+
+        // ════════════════════════════════════════
+        //  事件：速度
+        // ════════════════════════════════════════
+
+        private void trkSpeed_Scroll(object sender, EventArgs e)
+        {
+            timePlayer.Interval = trkSpeed.Value * 1000;
+            lblSpeed.Text = $"播放速度：{trkSpeed.Value}s";
+        }
+
+        // ════════════════════════════════════════
+        //  事件：計時器 / 鍵盤
+        // ════════════════════════════════════════
+
+        private void timePlayer_Tick(object sender, EventArgs e)
+        {
+            NextWordList();
+            PlaySelectedWord();
+        }
+
+        private void frmWordCards_KeyPress(object sender, KeyPressEventArgs e)
+        {
+            if (txtSearch.Focused) return; // 搜尋中不觸發
+            if (isPlay) return;
+
+            switch (e.KeyChar)
+            {
+                case (char)Keys.Return:
+                    NextWordList();
+                    PlaySelectedWord();
+                    e.Handled = true;
+                    break;
+                case (char)Keys.Space:
+                    if (lstWordList.SelectedIndex >= 0)
+                        PlaySelectedWord();
+                    e.Handled = true;
+                    break;
             }
         }
     }
